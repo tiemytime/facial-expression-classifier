@@ -1,0 +1,5 @@
+# Installed BEFORE requirements.txt so transformers finds a CPU-only torch
+# already satisfied, instead of pip resolving the full CUDA build from the
+# default PyPI index (multiple GB larger, useless on a CPU-only free tier).
+--index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0

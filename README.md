@@ -2,19 +2,24 @@
 
 A small ML-backed web application built for the Lifeverse DevOps/MLOps
 Engineer technical assessment (`context/Lifeverse_DevOps_MLOps_Technical_Assessment_VF26.pdf`).
-A user's live webcam feed is sent to a backend API, which runs it through a
-packaged computer-vision model and returns an understandable prediction:
-whether a face was found, which way it's looking (gaze), and its expression.
+A user's live webcam feed is sent to a backend API, which runs it through
+two packaged computer-vision models and returns an understandable
+prediction: whether a face was found, which way it's looking (gaze), and
+its expression.
 
 > **Scope note on the ML task.** The assessment's suggested default is a
-> generic lightweight image classifier (e.g. from the PyTorch Vision
-> catalogue); it explicitly allows an equivalent alternative task "if you
-> agree it with us before you start." This submission implements facial
-> landmark tracking (MediaPipe Face Mesh) with gaze/expression heuristics on
-> top, on the assumption that's been agreed. If it hasn't, the pretrained
-> model can be swapped for a plain torchvision classifier without touching
-> the Docker/CI/observability work, which is the actual priority of this
-> assessment (see `context/HOW_TO_PROCEED.md`).
+> lightweight pretrained image-classification model (e.g. from the PyTorch
+> Vision catalogue); it explicitly allows an equivalent alternative task
+> "if you agree it with us before you start." This submission's
+> **expression** output *is* exactly that default: a genuine pretrained
+> image-classification model (`dima806/facial_emotions_image_detection`,
+> see MLOPS_NOTES.md), just applied to faces instead of general objects.
+> The **facial landmark detection + gaze** layer on top (MediaPipe Face
+> Mesh) is additional, and is the part that counts as an "alternative
+> task" needing prior agreement - on the assumption that's been given. If
+> it hasn't, the landmark/gaze layer can be dropped without touching the
+> classification model or any of the Docker/CI/observability work, which
+> is the actual priority of this assessment (see `context/HOW_TO_PROCEED.md`).
 
 ## Expected flow
 
@@ -30,16 +35,18 @@ backend over HTTP (`GET /health`, `GET /ready`, `POST /predict`).
 ## Repository structure
 
 ```
-backend/            FastAPI app, model wrapper, heuristics, tests
+backend/            FastAPI app, model wrappers, tests
   app/
-    main.py           routes, middleware, lifespan (model load/close)
+    main.py           routes, middleware, lifespan (load/close both models)
     config.py         env-var driven settings
-    inference.py      decode image -> model -> heuristics -> response
+    inference.py      decode image -> face mesh -> crop -> gaze + classifier
     models/
-      face_mesh_model.py   MediaPipe Face Mesh wrapper (loaded once)
-      gaze.py               gaze-direction heuristic
-      expression.py         expression heuristic
-  tests/              pytest: API tests + pure-function unit tests
+      face_mesh_model.py        MediaPipe Face Mesh wrapper (loaded once)
+      gaze.py                    gaze-direction heuristic (landmark geometry)
+      expression_classifier.py  pretrained ViT expression classifier (loaded once)
+  scripts/
+    prefetch_model.py  bakes classifier weights into the image at build time
+  tests/              pytest: API tests + pure-function + model contract tests
   Dockerfile
 frontend/           Static HTML/CSS/JS webcam client (no build step)
   Dockerfile          nginx (non-root), templates config.js from env at start
@@ -79,7 +86,9 @@ roughly once per second.
 # Backend
 cd backend
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt
+pip install -r requirements-torch.txt   # CPU-only torch, from its own index
+pip install -r requirements-dev.txt     # must be a separate command - see
+                                         # the comment in requirements.txt
 uvicorn app.main:app --reload --port 8000
 
 # Frontend, in a second terminal
@@ -145,15 +154,18 @@ model is ready; see `/ready`.
 ```
 
 ### `GET /ready`
-Readiness - the model is loaded and able to run inference. A load balancer
-or orchestrator should gate traffic on this, not `/health`, during startup.
+Readiness - both models are loaded and able to run inference. A load
+balancer or orchestrator should gate traffic on this, not `/health`, during
+startup.
 
 ```json
 {
   "status": "ok",
   "model_loaded": true,
-  "model_name": "mediapipe-face-mesh",
-  "model_version": "mediapipe-0.10.14"
+  "models": [
+    { "name": "mediapipe-face-mesh", "version": "mediapipe-0.10.14", "task": "landmark_detection" },
+    { "name": "dima806/facial_emotions_image_detection", "version": "747cf16692ee", "task": "image_classification" }
+  ]
 }
 ```
 
@@ -166,21 +178,29 @@ curl -X POST http://localhost:8000/predict \
   -F "file=@sample.jpg;type=image/jpeg"
 ```
 
-**Example successful prediction** (a photo with one clearly visible,
-front-facing, smiling face):
+**Example successful prediction** - this is real, verified output from a
+`TestClient` run against a clearly visible, front-facing, smiling face
+(steady-state timing; see "cold start" note below):
 
 ```json
 {
   "face_detected": true,
   "landmark_count": 478,
-  "gaze": { "direction": "center", "confidence": 0.91 },
-  "expression": { "label": "happy", "confidence": 0.74 },
-  "inference_time_ms": 42.3,
-  "model_name": "mediapipe-face-mesh",
-  "model_version": "mediapipe-0.10.14+gaze-heuristic-1.0.0+expression-heuristic-1.0.0",
+  "gaze": { "direction": "center", "confidence": 0.5 },
+  "expression": { "label": "happy", "confidence": 0.981 },
+  "inference_time_ms": 268.4,
+  "models": [
+    { "name": "mediapipe-face-mesh", "version": "mediapipe-0.10.14", "task": "landmark_detection" },
+    { "name": "dima806/facial_emotions_image_detection", "version": "747cf16692ee", "task": "image_classification" }
+  ],
   "warnings": []
 }
 ```
+
+> **Cold start.** The *first* `/predict` call after a fresh process start
+> took ~2.5s in testing (torch/ViT warm-up); every call after that on the
+> same process was ~250-300ms on a CPU. Don't use the first post-deploy
+> request as your latency baseline - see "Observability" below.
 
 **No-face example** (what the blank-image test in `tests/test_predict.py`
 asserts on):
@@ -192,8 +212,10 @@ asserts on):
   "gaze": null,
   "expression": null,
   "inference_time_ms": 8.1,
-  "model_name": "mediapipe-face-mesh",
-  "model_version": "mediapipe-0.10.14+gaze-heuristic-1.0.0+expression-heuristic-1.0.0",
+  "models": [
+    { "name": "mediapipe-face-mesh", "version": "mediapipe-0.10.14", "task": "landmark_detection" },
+    { "name": "dima806/facial_emotions_image_detection", "version": "747cf16692ee", "task": "image_classification" }
+  ],
   "warnings": ["no face detected in the submitted frame"]
 }
 ```
@@ -211,25 +233,36 @@ asserts on):
 
 ## Model, expected inputs, and limitations
 
-- **Model**: MediaPipe Face Mesh (468 landmarks + iris refinement), a
-  pretrained model shipped inside the `mediapipe` pip package - no
-  separate weight download, no network access at inference time.
-- **Derived predictions**: gaze direction and expression are **not** a
-  second trained model; they're deterministic geometry computed from the
-  landmarks (see `backend/app/models/gaze.py` and `expression.py`). This
-  keeps the whole pipeline a single packaged, versioned model. Full
-  rationale and versioning in `MLOPS_NOTES.md`.
+This pipeline uses **two** pretrained models, each doing one job:
+
+- **MediaPipe Face Mesh** (468 landmarks + iris refinement) - landmark
+  detection, shipped inside the `mediapipe` pip package, no separate weight
+  download. Its output also drives the **gaze** direction, which is
+  deterministic geometry computed from the landmarks (see
+  `backend/app/models/gaze.py`) - not a second trained model.
+- **`dima806/facial_emotions_image_detection`** (ViT-base, apache-2.0,
+  pinned to commit `747cf16692ee`) - a genuine trained image-classification
+  model, run on a crop of the detected face, producing the **expression**
+  label (`sad`/`disgust`/`angry`/`neutral`/`fear`/`surprise`/`happy`) and
+  its confidence. Its weights are pre-downloaded at Docker build time (see
+  `backend/scripts/prefetch_model.py`) so no network access happens at
+  inference time either. Full rationale and versioning in `MLOPS_NOTES.md`.
 - **Expected input**: a single RGB image (JPEG/PNG/WebP) containing at most
   one reasonably front-facing, well-lit human face, under `MAX_IMAGE_SIZE_MB`.
 - **Known limitations**:
   - Single face only - `max_num_faces=1`; extra faces are ignored.
   - Sensitive to poor lighting, strong head angles/profile views, and
     occlusion (glasses glare, masks, hair).
-  - Gaze/expression labels are coarse heuristics tuned by hand, not trained
-    or validated against a labeled dataset - do not treat them as accurate
-    attention or emotion measurements.
-  - Gaze direction is relative to the raw camera frame, not corrected for
-    any mirroring the frontend preview may apply.
+  - Gaze direction is a hand-tuned heuristic, not trained or validated
+    against a labeled dataset - don't treat it as an accurate attention
+    measurement, and it's relative to the raw camera frame, not corrected
+    for any mirroring the frontend preview may apply.
+  - The expression classifier's confidence scores are independent sigmoid
+    outputs per class, not a softmax - they don't sum to 1 across classes;
+    only the top-1 label and its own score are surfaced.
+  - The expression classifier was trained on a public FER-style dataset,
+    not validated against our usage - its label set and accuracy are
+    inherited from the upstream model card, not benchmarked here.
   - Webcam capture requires a secure context (HTTPS or `localhost`) per
     browser policy.
   - The frontend polls snapshots (default every 1s) rather than streaming
@@ -251,30 +284,35 @@ asserts on):
 - **Investigating elevated latency or repeated failures**: start from
   `X-Request-ID` to correlate a slow/failed browser request with its exact
   server log line; compare `inference_time_ms` (model-only) against the
-  total `X-Response-Time-Ms` (includes image decode and the shared
-  inference lock's wait time) to tell "model is slow" apart from "requests
-  are queued behind the lock" (see risk below); check `docker stats` /
-  host metrics for CPU saturation or memory pressure; check `/ready` to
-  rule out a crash-looping model load.
+  total `X-Response-Time-Ms` (includes image decode and the two models'
+  lock wait time) to tell "model is slow" apart from "requests are queued
+  behind a lock" (see risk below); expect the *first* `/predict` after
+  every container start to be ~2.5s (torch/ViT warm-up) and don't mistake
+  that for a regression; check `docker stats` / host metrics for CPU
+  saturation or memory pressure; check `/ready` to rule out a
+  crash-looping model load.
 
 ## Operational risks
 
-1. **Shared-instance inference lock becomes a throughput bottleneck.**
-   `FaceMeshModel` is a single instance guarded by one `threading.Lock`
-   (see the docstring in `face_mesh_model.py` for why). Under concurrent
-   load, requests queue up behind it, inflating `X-Response-Time-Ms` even
-   though `inference_time_ms` per call stays flat.
+1. **Two shared-instance inference locks become a throughput bottleneck.**
+   Both `FaceMeshModel` and `ExpressionClassifier` are single instances
+   each guarded by their own `threading.Lock` (see their docstrings for
+   why). Under concurrent load, requests queue up behind whichever is
+   slower - the classifier, at ~250ms/call, dominates - inflating
+   `X-Response-Time-Ms` even though `inference_time_ms` per call stays flat.
    *Detect*: a growing gap between `X-Response-Time-Ms` and
    `inference_time_ms` under load.
-   *Mitigate*: run a small pool of `FaceMeshModel` instances behind a
-   semaphore, or scale out with multiple worker processes (each gets its
-   own model instance - mediapipe objects shouldn't be shared across
+   *Mitigate*: run a small pool of instances behind a semaphore, or scale
+   out with multiple worker processes (each gets its own model instances -
+   neither mediapipe's nor torch's objects should be shared across
    processes anyway).
 
-2. **Memory footprint under concurrent image processing.** mediapipe +
-   OpenCV hold native buffers per in-flight frame; a burst of large
-   uploads near `MAX_IMAGE_SIZE_MB` from many clients at once can spike
-   RSS and trigger an OOM kill on memory-constrained free-tier hosts.
+2. **Memory and image-size footprint under concurrent image processing.**
+   mediapipe/OpenCV hold native buffers per in-flight frame, and the ViT
+   classifier (~350MB of weights plus torch's own overhead) is noticeably
+   heavier than mediapipe alone; a burst of large uploads near
+   `MAX_IMAGE_SIZE_MB` from many clients at once can spike RSS and trigger
+   an OOM kill on memory-constrained free-tier hosts.
    *Detect*: container restarts correlated with memory-limit-reached
    events in host/platform logs.
    *Mitigate*: keep `MAX_IMAGE_SIZE_MB` conservative (default 8), cap
@@ -346,10 +384,14 @@ way to reconcile that without restructuring this repo is a small local
 
 1. Create a new Space -> SDK: **Docker** -> note its git URL
    (`https://huggingface.co/spaces/<you>/<space-name>`).
-2. From this repo:
+2. From this repo (the `deploy/huggingface/` subpath must be preserved -
+   not flattened - because `deploy/huggingface/Dockerfile`'s `COPY`
+   instructions reference it relative to the build context root):
    ```bash
    git clone https://huggingface.co/spaces/<you>/<space-name> /tmp/lifeverse-space
-   cp -r backend frontend deploy/huggingface/config.js /tmp/lifeverse-space/
+   mkdir -p /tmp/lifeverse-space/deploy/huggingface
+   cp -r backend frontend /tmp/lifeverse-space/
+   cp deploy/huggingface/config.js /tmp/lifeverse-space/deploy/huggingface/config.js
    cp deploy/huggingface/Dockerfile /tmp/lifeverse-space/Dockerfile
    cp deploy/huggingface/README_SPACE.md /tmp/lifeverse-space/README.md
    cd /tmp/lifeverse-space
@@ -358,8 +400,14 @@ way to reconcile that without restructuring this repo is a small local
    The `git push` to the Space **is** the deployment trigger - Spaces build
    and redeploy on every push automatically.
 3. The Space builds `Dockerfile` (= `deploy/huggingface/Dockerfile`), which
-   installs the backend, copies the frontend into `static/`, and serves
-   both on port `7860` with `SERVE_FRONTEND=true`.
+   installs the backend (including CPU-only torch + transformers),
+   pre-fetches the pinned expression-classifier weights, copies the
+   frontend into `static/`, and serves both on port `7860` with
+   `SERVE_FRONTEND=true`. The image is noticeably larger than a
+   mediapipe-only build (~1-1.5GB, mostly torch + the ~350MB classifier
+   weights) and the build itself takes a few minutes - expected, not a
+   sign something's wrong, but worth knowing before you wonder why the
+   first build is slow.
 4. No secrets are required for this app. If any are added later, set them
    as **Space secrets**, never in the Dockerfile or git history.
 

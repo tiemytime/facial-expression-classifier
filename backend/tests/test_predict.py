@@ -31,7 +31,9 @@ def test_predict_blank_image_reports_no_face(client):
     assert body["expression"] is None
     assert "no face detected" in body["warnings"][0]
     assert body["inference_time_ms"] >= 0
-    assert body["model_name"] == "mediapipe-face-mesh"
+    model_names = {m["name"] for m in body["models"]}
+    assert "mediapipe-face-mesh" in model_names
+    assert "dima806/facial_emotions_image_detection" in model_names
 
 
 def test_predict_rejects_unsupported_content_type(client):

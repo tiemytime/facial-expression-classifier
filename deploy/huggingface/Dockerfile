@@ -9,6 +9,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/app/.cache/huggingface \
     SERVE_FRONTEND=true \
     STATIC_DIR=static \
     PORT=7860
@@ -19,15 +20,23 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY backend/requirements.txt .
-RUN pip install -r requirements.txt
+COPY backend/requirements-torch.txt backend/requirements.txt ./
+RUN pip install -r requirements-torch.txt \
+    && pip install -r requirements.txt
 
 COPY backend/app ./app
+COPY backend/scripts ./scripts
+RUN python -m scripts.prefetch_model
+
 COPY frontend ./static
 # Combined mode serves frontend and API from the same origin, so the
 # frontend must call relative URLs - overwrite the standalone-mode default.
 COPY deploy/huggingface/config.js ./static/config.js
 RUN rm -f ./static/Dockerfile ./static/docker-entrypoint.sh ./static/config.template.js
+
+# Only after the fetch above - see backend/Dockerfile for why ordering matters.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 RUN useradd --create-home --uid 1000 appuser \
     && chown -R appuser:appuser /app

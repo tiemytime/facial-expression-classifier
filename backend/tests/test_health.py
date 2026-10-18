@@ -5,11 +5,14 @@ def test_health_ok(client):
     assert body["status"] == "ok"
 
 
-def test_ready_reports_model_loaded(client):
+def test_ready_reports_both_models_loaded(client):
     response = client.get("/ready")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
     assert body["model_loaded"] is True
-    assert body["model_name"] == "mediapipe-face-mesh"
-    assert body["model_version"].startswith("mediapipe-")
+
+    models_by_task = {m["task"]: m for m in body["models"]}
+    assert models_by_task["landmark_detection"]["name"] == "mediapipe-face-mesh"
+    assert models_by_task["landmark_detection"]["version"].startswith("mediapipe-")
+    assert models_by_task["image_classification"]["name"] == "dima806/facial_emotions_image_detection"

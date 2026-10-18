@@ -1,9 +1,9 @@
 """FastAPI application entrypoint.
 
-Request flow: frontend -> this API -> packaged face-mesh model -> heuristic
-gaze/expression classification -> JSON prediction. The frontend never loads
-the model itself; it only ever calls GET /health, GET /ready and
-POST /predict over HTTP.
+Request flow: frontend -> this API -> MediaPipe Face Mesh (landmark
+detection) -> gaze heuristic + pretrained expression classifier -> JSON
+prediction. The frontend never loads a model itself; it only ever calls
+GET /health, GET /ready and POST /predict over HTTP.
 """
 import logging
 import os
@@ -18,29 +18,33 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.inference import InvalidImageError, run_prediction
 from app.logging_config import configure_logging
-from app.models.face_mesh_model import MODEL_NAME, FaceMeshModel
-from app.schemas import ErrorResponse, HealthResponse, PredictionResponse, ReadyResponse
+from app.models.expression_classifier import MODEL_NAME as EXPRESSION_MODEL_NAME
+from app.models.expression_classifier import ExpressionClassifier
+from app.models.face_mesh_model import MODEL_NAME as FACE_MESH_MODEL_NAME
+from app.models.face_mesh_model import FaceMeshModel
+from app.schemas import ErrorResponse, HealthResponse, ModelInfo, PredictionResponse, ReadyResponse
 
 settings = get_settings()
 configure_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
-_state: dict = {"model": None, "started_at": None}
+_state: dict = {"face_mesh": None, "expression_classifier": None, "started_at": None}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("application startup app_env=%s", settings.app_env)
-    _state["model"] = FaceMeshModel(
+    _state["face_mesh"] = FaceMeshModel(
         max_num_faces=settings.max_num_faces,
         min_detection_confidence=settings.min_detection_confidence,
         min_tracking_confidence=settings.min_tracking_confidence,
     )
+    _state["expression_classifier"] = ExpressionClassifier()
     _state["started_at"] = time.time()
     yield
     logger.info("application shutdown")
-    if _state["model"] is not None:
-        _state["model"].close()
+    if _state["face_mesh"] is not None:
+        _state["face_mesh"].close()
 
 
 app = FastAPI(title="Lifeverse Facial Feature Tracker", version="0.1.0", lifespan=lifespan)
@@ -84,17 +88,23 @@ async def health() -> HealthResponse:
 
 @app.get("/ready", response_model=ReadyResponse)
 async def ready() -> ReadyResponse:
-    """Readiness probe: the model is loaded and able to serve predictions."""
-    model = _state["model"]
-    if model is None:
-        return ReadyResponse(status="not_ready", model_loaded=False, model_name=MODEL_NAME, model_version="unknown")
-    return ReadyResponse(status="ok", model_loaded=True, model_name=MODEL_NAME, model_version=model.version)
+    """Readiness probe: both models are loaded and able to serve predictions."""
+    face_mesh = _state["face_mesh"]
+    classifier = _state["expression_classifier"]
+    if face_mesh is None or classifier is None:
+        return ReadyResponse(status="not_ready", model_loaded=False, models=[])
+    models = [
+        ModelInfo(name=FACE_MESH_MODEL_NAME, version=face_mesh.version, task="landmark_detection"),
+        ModelInfo(name=EXPRESSION_MODEL_NAME, version=classifier.version, task="image_classification"),
+    ]
+    return ReadyResponse(status="ok", model_loaded=True, models=models)
 
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(file: UploadFile) -> PredictionResponse:
-    model = _state["model"]
-    if model is None:
+    face_mesh = _state["face_mesh"]
+    classifier = _state["expression_classifier"]
+    if face_mesh is None or classifier is None:
         raise HTTPException(status_code=503, detail="model is not ready yet")
 
     if file.content_type not in settings.allowed_content_type_list:
@@ -112,7 +122,7 @@ async def predict(file: UploadFile) -> PredictionResponse:
         raise HTTPException(status_code=400, detail="empty file")
 
     try:
-        return run_prediction(model, raw_bytes)
+        return run_prediction(face_mesh, classifier, raw_bytes)
     except InvalidImageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # inference-time failure, not a client input problem

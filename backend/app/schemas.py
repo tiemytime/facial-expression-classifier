@@ -9,11 +9,16 @@ class HealthResponse(BaseModel):
     app_env: str
 
 
+class ModelInfo(BaseModel):
+    name: str
+    version: str
+    task: str = Field(description="One of: landmark_detection, image_classification.")
+
+
 class ReadyResponse(BaseModel):
-    status: str = Field(description="Readiness: 'ok' only once the model is loaded and able to infer.")
+    status: str = Field(description="Readiness: 'ok' only once both models are loaded and able to infer.")
     model_loaded: bool
-    model_name: str
-    model_version: str
+    models: list[ModelInfo] = Field(default_factory=list)
 
 
 class GazeResult(BaseModel):
@@ -31,9 +36,10 @@ class PredictionResponse(BaseModel):
     landmark_count: int = Field(description="Number of facial landmarks returned, 0 if no face.")
     gaze: Optional[GazeResult] = None
     expression: Optional[ExpressionResult] = None
-    inference_time_ms: float
-    model_name: str
-    model_version: str
+    inference_time_ms: float = Field(
+        description="Total model time: face-mesh detection plus, if a face was found, expression classification."
+    )
+    models: list[ModelInfo]
     warnings: list[str] = Field(default_factory=list)
 
 

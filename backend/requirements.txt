@@ -7,3 +7,12 @@ mediapipe==0.10.14
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 Pillow==10.4.0
+transformers==4.46.3
+
+# torch (CPU-only) is installed separately from requirements-torch.txt -
+# `pip install torch` alone would pull the much larger CUDA-enabled build.
+# Install as TWO separate commands, not combined with multiple -r flags:
+# that would leak requirements-torch.txt's --index-url into this file's
+# resolution too and make pip unable to find fastapi/etc. on PyPI.
+#   pip install -r requirements-torch.txt
+#   pip install -r requirements.txt

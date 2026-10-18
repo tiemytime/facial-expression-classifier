@@ -5,7 +5,8 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/app/.cache/huggingface
 
 # libgl1 / libglib2.0-0: required by opencv-python-headless's native
 # extension even in "headless" builds, on a minimal Debian slim image.
@@ -16,10 +17,23 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# torch (CPU-only) first, from its own index - see requirements-torch.txt.
+COPY requirements-torch.txt requirements.txt ./
+RUN pip install -r requirements-torch.txt \
+    && pip install -r requirements.txt
 
 COPY app ./app
+COPY scripts ./scripts
+
+# Bake the pinned expression-classifier weights into the image so the
+# container never needs network access to load the model at runtime - see
+# scripts/prefetch_model.py and MLOPS_NOTES.md "Packaging and loading".
+RUN python -m scripts.prefetch_model
+
+# Only after the fetch above: force the model loader into fully offline
+# mode for every container started from this image.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 RUN useradd --create-home --uid 1000 appuser \
     && chown -R appuser:appuser /app

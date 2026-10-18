@@ -36,19 +36,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "mediapipe-face-mesh"
 
-# Landmark indices used by the heuristics in gaze.py / expression.py.
-# Indices come from MediaPipe's documented 468-point face mesh topology
-# (+10 iris points 468-477 when refine_landmarks=True).
-LEFT_EYE_CORNERS = (33, 133)
-RIGHT_EYE_CORNERS = (362, 263)
-LEFT_IRIS = range(468, 473)
-RIGHT_IRIS = range(473, 478)
-MOUTH_CORNERS = (61, 291)
-MOUTH_TOP_BOTTOM = (13, 14)
-LEFT_EYEBROW_TOP = 105
-LEFT_EYE_TOP = 159
-FACE_WIDTH_REF = (234, 454)
-
 
 @dataclass
 class FaceMeshPrediction:
