@@ -7,7 +7,11 @@ RUN apk add --no-cache gettext curl
 COPY . /usr/share/nginx/html
 COPY docker-entrypoint.sh /docker-entrypoint.d/40-render-config.sh
 RUN chmod +x /docker-entrypoint.d/40-render-config.sh \
-    && rm -f /usr/share/nginx/html/Dockerfile /usr/share/nginx/html/docker-entrypoint.sh
+    && rm -f /usr/share/nginx/html/Dockerfile /usr/share/nginx/html/docker-entrypoint.sh \
+    # The entrypoint scripts (including ours) run as the unprivileged
+    # "nginx" user at container start, which needs write access to
+    # re-render config.js from config.template.js on every start.
+    && chown -R nginx:nginx /usr/share/nginx/html
 USER nginx
 
 EXPOSE 8080
