@@ -1,0 +1,32 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: INFO
+      CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "8080:8080"
+    environment:
+      # Resolved by the BROWSER, not by the frontend container - so this
+      # must be an address the host machine can reach, not the Docker
+      # Compose service name "backend". Using the internal service name
+      # here is a classic cause of "works in curl, fails in the browser"
+      # misconfiguration (see INCIDENT_NOTES.md).
+      API_BASE_URL: http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy

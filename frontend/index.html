@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lifeverse Facial Feature Tracker</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Facial Feature Tracker</h1>
+    <p class="subtitle">Live webcam &rarr; FastAPI backend &rarr; MediaPipe face mesh &rarr; gaze + expression</p>
+  </header>
+
+  <main>
+    <section class="video-panel">
+      <div class="video-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="controls">
+        <button id="startBtn">Start camera</button>
+        <button id="stopBtn" disabled>Stop camera</button>
+        <label for="interval">Capture every</label>
+        <select id="interval">
+          <option value="500">0.5s</option>
+          <option value="1000" selected>1s</option>
+          <option value="2000">2s</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="status-panel" aria-live="polite">
+      <h2>Status</h2>
+      <dl>
+        <dt>API</dt>
+        <dd id="apiStatus" class="badge badge-unknown">checking&hellip;</dd>
+
+        <dt>Face detected</dt>
+        <dd id="faceStatus">&mdash;</dd>
+
+        <dt>Gaze</dt>
+        <dd id="gazeStatus">&mdash;</dd>
+
+        <dt>Expression</dt>
+        <dd id="expressionStatus">&mdash;</dd>
+
+        <dt>Inference time</dt>
+        <dd id="timingStatus">&mdash;</dd>
+      </dl>
+
+      <div id="errorBanner" class="error-banner" hidden></div>
+
+      <details>
+        <summary>Model &amp; limitations</summary>
+        <p>
+          Model: MediaPipe Face Mesh (468 landmarks + iris refinement), with a
+          deterministic geometric heuristic for gaze direction and
+          expression, both documented in <code>MLOPS_NOTES.md</code>.
+        </p>
+        <ul>
+          <li>Single face only; additional faces in frame are ignored.</li>
+          <li>Sensitive to poor lighting, extreme head angles, and occlusion (glasses, masks, hair).</li>
+          <li>Gaze/expression labels are coarse heuristics, not a trained or clinically validated classifier.</li>
+          <li>Requires HTTPS or <code>localhost</code> for camera access (browser security requirement).</li>
+        </ul>
+      </details>
+    </section>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
