@@ -23,15 +23,6 @@
   const expressionStatusEl = document.getElementById("expressionStatus");
   const timingStatusEl = document.getElementById("timingStatus");
   const errorBanner = document.getElementById("errorBanner");
-  const themeToggle = document.getElementById("themeToggle");
-
-  themeToggle.addEventListener("click", () => {
-    const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
-    document.documentElement.setAttribute("data-theme", next);
-    try {
-      localStorage.setItem("theme", next);
-    } catch (err) {}
-  });
 
   let stream = null;
   let captureTimer = null;
