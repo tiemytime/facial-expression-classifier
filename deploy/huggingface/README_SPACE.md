@@ -1,14 +1,14 @@
 ---
-title: Lifeverse Facial Feature Tracker
+title: Facial Expression Classifier
 emoji: 👁️
-colorFrom: blue
-colorTo: indigo
+colorFrom: yellow
+colorTo: purple
 sdk: docker
 app_port: 7860
 pinned: false
 ---
 
-# Lifeverse Facial Feature Tracker
+# Facial Expression Classifier
 
 Live webcam facial landmark tracking (MediaPipe Face Mesh) with gaze
 direction and expression heuristics, served as a single FastAPI app.
