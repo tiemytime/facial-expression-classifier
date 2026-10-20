@@ -88,6 +88,28 @@
           </ul>
         </details>
       </section>
+
+      <section class="logs-card">
+        <div class="logs-head">
+          <div>
+            <h2 class="logs-title">Request logs</h2>
+            <p class="logs-subtitle">Live view of requests this page sends to the API.</p>
+          </div>
+          <label class="switch" for="logsToggle">
+            <input type="checkbox" id="logsToggle" />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <div id="logsPanel" class="logs-panel" hidden>
+          <div class="logs-toolbar">
+            <span id="logsCount" class="logs-count">0 requests</span>
+            <button id="logsClearBtn" class="logs-clear" type="button">Clear</button>
+          </div>
+          <ul id="logsList" class="logs-list">
+            <li class="logs-empty">No requests logged yet.</li>
+          </ul>
+        </div>
+      </section>
     </main>
   </div>
 

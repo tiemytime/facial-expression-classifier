@@ -24,9 +24,84 @@
   const timingStatusEl = document.getElementById("timingStatus");
   const errorBanner = document.getElementById("errorBanner");
 
+  const logsToggle = document.getElementById("logsToggle");
+  const logsPanel = document.getElementById("logsPanel");
+  const logsList = document.getElementById("logsList");
+  const logsCountEl = document.getElementById("logsCount");
+  const logsClearBtn = document.getElementById("logsClearBtn");
+
   let stream = null;
   let captureTimer = null;
   let inFlight = false;
+
+  // Request log: a client-side view of traffic this page sends to the API,
+  // gated behind a toggle so nothing is recorded (or rendered) unless the
+  // user opts in. Capped to avoid unbounded memory growth on a long session.
+  const MAX_LOG_ENTRIES = 50;
+  let logsEnabled = false;
+  try {
+    logsEnabled = localStorage.getItem("logsEnabled") === "true";
+  } catch (err) {}
+  let logEntries = [];
+
+  function applyLogsEnabled(enabled) {
+    logsEnabled = enabled;
+    logsToggle.checked = enabled;
+    logsPanel.hidden = !enabled;
+    try {
+      localStorage.setItem("logsEnabled", String(enabled));
+    } catch (err) {}
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function renderLogs() {
+    logsCountEl.textContent = `${logEntries.length} request${logEntries.length === 1 ? "" : "s"}`;
+    if (logEntries.length === 0) {
+      logsList.innerHTML = '<li class="logs-empty">No requests logged yet.</li>';
+      return;
+    }
+    logsList.innerHTML = logEntries
+      .map((entry) => {
+        const statusClass = entry.ok ? "status-ok" : "status-bad";
+        return `<li class="log-entry">
+          <span class="log-time">${entry.time}</span>
+          <span class="log-method">${entry.method}</span>
+          <span class="log-path">${entry.path}</span>
+          <span class="log-status ${statusClass}">${entry.status}</span>
+          <span class="log-time-ms">${entry.ms}ms</span>
+          <span class="log-summary">${escapeHtml(entry.summary || "")}</span>
+        </li>`;
+      })
+      .join("");
+  }
+
+  function addLogEntry({ method, path, status, ms, ok, summary }) {
+    if (!logsEnabled) return;
+    const now = new Date();
+    const time = now.toLocaleTimeString([], { hour12: false }) + "." + String(now.getMilliseconds()).padStart(3, "0");
+    logEntries.unshift({ time, method, path, status, ms, ok, summary });
+    if (logEntries.length > MAX_LOG_ENTRIES) logEntries.length = MAX_LOG_ENTRIES;
+    renderLogs();
+  }
+
+  function summarizePrediction(body) {
+    if (!body.face_detected) return "no face detected";
+    const parts = [];
+    if (body.gaze) parts.push(`gaze=${body.gaze.direction}`);
+    if (body.expression) parts.push(`expression=${body.expression.label}`);
+    parts.push(`${body.inference_time_ms.toFixed(0)}ms inference`);
+    return parts.join(" ");
+  }
+
+  applyLogsEnabled(logsEnabled);
+  logsToggle.addEventListener("change", () => applyLogsEnabled(logsToggle.checked));
+  logsClearBtn.addEventListener("click", () => {
+    logEntries = [];
+    renderLogs();
+  });
 
   function apiUrl(path) {
     return `${apiBaseUrl}${path}`;
@@ -47,13 +122,18 @@
   }
 
   async function checkHealth() {
+    const start = performance.now();
     try {
       const res = await fetch(apiUrl("/health"), { cache: "no-store" });
+      const ms = Math.round(performance.now() - start);
       if (!res.ok) throw new Error(`status ${res.status}`);
       setBadge(apiStatusEl, true, "online");
+      addLogEntry({ method: "GET", path: "/health", status: res.status, ms, ok: true, summary: "ok" });
     } catch (err) {
+      const ms = Math.round(performance.now() - start);
       setBadge(apiStatusEl, false, "unreachable");
       showError(`Cannot reach the API at "${apiBaseUrl}". Is the backend running and is apiBaseUrl configured correctly?`);
+      addLogEntry({ method: "GET", path: "/health", status: "ERR", ms, ok: false, summary: err.message });
     }
   }
 
@@ -106,21 +186,32 @@
 
     snapshot.toBlob(
       async (blob) => {
+        const start = performance.now();
+        let status = "ERR";
+        let ok = false;
+        let summary = "";
         try {
           const formData = new FormData();
           formData.append("file", blob, "frame.jpg");
           const res = await fetch(apiUrl("/predict"), { method: "POST", body: formData });
+          status = res.status;
           const body = await res.json();
           if (!res.ok) {
-            throw new Error(body.detail || `request failed with status ${res.status}`);
+            summary = body.detail || `request failed with status ${res.status}`;
+            throw new Error(summary);
           }
+          ok = true;
           clearError();
           setBadge(apiStatusEl, true, "online");
           renderPrediction(body);
+          summary = summarizePrediction(body);
         } catch (err) {
           setBadge(apiStatusEl, false, "error");
           showError(`Prediction failed: ${err.message}`);
+          if (!summary) summary = err.message;
         } finally {
+          const ms = Math.round(performance.now() - start);
+          addLogEntry({ method: "POST", path: "/predict", status, ms, ok, summary });
           inFlight = false;
           if (stream) scheduleCapture();
         }

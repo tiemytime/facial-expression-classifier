@@ -60,6 +60,7 @@ app.add_middleware(
 @app.middleware("http")
 async def request_id_and_timing(request: Request, call_next):
     request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
     start = time.perf_counter()
     try:
         response = await call_next(request)
@@ -101,14 +102,21 @@ async def ready() -> ReadyResponse:
 
 
 @app.post("/predict", response_model=PredictionResponse)
-async def predict(file: UploadFile) -> PredictionResponse:
+async def predict(request: Request, file: UploadFile) -> PredictionResponse:
+    request_id = getattr(request.state, "request_id", "-")
     face_mesh = _state["face_mesh"]
     classifier = _state["expression_classifier"]
     if face_mesh is None or classifier is None:
+        logger.warning("predict rejected reason=model_not_ready", extra={"request_id": request_id})
         raise HTTPException(status_code=503, detail="model is not ready yet")
 
     if file.content_type not in settings.allowed_content_type_list:
         allowed = settings.allowed_content_type_list
+        logger.warning(
+            "predict rejected reason=unsupported_content_type content_type=%s",
+            file.content_type,
+            extra={"request_id": request_id},
+        )
         raise HTTPException(
             status_code=400,
             detail=f"unsupported content type '{file.content_type}', expected one of {allowed}",
@@ -117,16 +125,28 @@ async def predict(file: UploadFile) -> PredictionResponse:
     raw_bytes = await file.read()
     max_bytes = settings.max_image_size_mb * 1024 * 1024
     if len(raw_bytes) > max_bytes:
+        logger.warning(
+            "predict rejected reason=file_too_large size_bytes=%d", len(raw_bytes), extra={"request_id": request_id}
+        )
         raise HTTPException(status_code=413, detail=f"file exceeds {settings.max_image_size_mb}MB limit")
     if len(raw_bytes) == 0:
+        logger.warning("predict rejected reason=empty_file", extra={"request_id": request_id})
         raise HTTPException(status_code=400, detail="empty file")
 
+    logger.info(
+        "predict received content_type=%s size_bytes=%d",
+        file.content_type,
+        len(raw_bytes),
+        extra={"request_id": request_id},
+    )
+
     try:
-        return run_prediction(face_mesh, classifier, raw_bytes)
+        return run_prediction(face_mesh, classifier, raw_bytes, request_id=request_id)
     except InvalidImageError as exc:
+        logger.warning("predict rejected reason=invalid_image", extra={"request_id": request_id})
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # inference-time failure, not a client input problem
-        logger.exception("inference error")
+        logger.exception("inference error", extra={"request_id": request_id})
         raise HTTPException(status_code=500, detail="inference failed, see server logs") from exc
 
 
