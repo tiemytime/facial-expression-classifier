@@ -50,7 +50,7 @@ backend/            FastAPI app, model wrappers, tests
   Dockerfile
 frontend/           Static HTML/CSS/JS webcam client (no build step)
   Dockerfile          nginx (non-root), templates config.js from env at start
-deploy/huggingface/  Combined single-container image + Space metadata
+deploy/huggingface/  Combined single-container image for deployment
 docker-compose.yml   Local dev: frontend + backend together
 .github/workflows/   CI: lint, test, build images, smoke-test
 context/
@@ -114,7 +114,7 @@ pytest -q             # 14 tests: API behaviour + pure-function unit tests
 docker build -f backend/Dockerfile  -t lifeverse-backend  backend
 docker build -f frontend/Dockerfile -t lifeverse-frontend frontend
 
-# Combined single-container image (used for the Hugging Face deployment),
+# Combined single-container image (used for deployment),
 # built from the repo root:
 docker build -f deploy/huggingface/Dockerfile -t lifeverse-combined .
 ```
@@ -130,7 +130,7 @@ All environment-specific values are read from environment variables (see
 | `LOG_LEVEL` | `INFO` | backend | Python logging level. |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | backend | Bind address for uvicorn. |
 | `CORS_ORIGINS` | `http://localhost:8080,http://127.0.0.1:8080` | backend | Comma-separated allow-list for the standalone (two-container) deployment. Ignored in combined mode. |
-| `SERVE_FRONTEND` | `false` | backend | `true` mounts `STATIC_DIR` at `/` so one container serves both the API and the frontend (used by `deploy/huggingface/Dockerfile`). |
+| `SERVE_FRONTEND` | `false` | backend | `true` mounts `STATIC_DIR` at `/` so one container serves both the API and the frontend (used by the combined deployment Dockerfile at `deploy/huggingface/Dockerfile`). |
 | `STATIC_DIR` | `static` | backend | Directory to serve when `SERVE_FRONTEND=true`. |
 | `MAX_IMAGE_SIZE_MB` | `8` | backend | Rejects oversized uploads with `413`. |
 | `MIN_DETECTION_CONFIDENCE` / `MIN_TRACKING_CONFIDENCE` | `0.5` | backend | MediaPipe Face Mesh thresholds. |
@@ -347,79 +347,29 @@ This pipeline uses **two** pretrained models, each doing one job:
    `/health` endpoint.
 
 **What would trigger a deployment.** None of the above pushes an image or
-deploys anywhere automatically - deployment here is a deliberate, manual
-step (see "Deploying to Hugging Face Spaces" below), gated on CI being
-green on `main`. In a team setting, the natural next step is: a merge to
-`main` that passes CI triggers a job that pushes the image to a registry
-and triggers the host's deploy (for Hugging Face Spaces, a `git push` to
-the Space's own git remote **is** the deploy trigger - see below).
+deploys anywhere automatically - deployment is a deliberate, manual step,
+gated on CI being green on `main`. In a team setting, the natural next step
+is: a merge to `main` that passes CI triggers a job that pushes the image
+to a registry and triggers the host's deploy (on Render, a `git push` to
+the connected branch **is** the deploy trigger).
 
 **How configuration differs between environments.** The exact same image
 runs in every environment; only environment variables change
 (`CORS_ORIGINS`, `SERVE_FRONTEND`, confidence thresholds, log level). Dev
-uses `.env` / compose environment blocks; a hosted environment (e.g. a
-Hugging Face Space) sets the same variables as Space secrets/variables.
-Nothing environment-specific is hard-coded in source, by design (see the
+uses `.env` / compose environment blocks; the hosted environment (Render)
+sets the same variables as Render environment variables. Nothing
+environment-specific is hard-coded in source, by design (see the
 Configuration table above).
 
 **How to roll back a faulty release.**
-- *Hugging Face Spaces*: a Space is a git repository - `git revert` the bad
-  commit (or `git reset --hard <previous-good-sha>` and force-push, if the
-  team agrees that's acceptable) and push; the Space rebuilds the previous
-  state automatically. This is the fastest rollback available on this
-  stack because there's no separate registry promotion step.
+- *Render*: Render keeps a history of previous deploys per service and lets
+  you roll back to a prior deploy from the dashboard, or `git revert` the
+  bad commit and push to trigger a fresh deploy.
 - *Generic registry-based deploy*: redeploy the previous image tag rather
   than rebuilding from source, so rollback doesn't depend on the build
   succeeding again.
 - In both cases: roll back first to restore service, investigate the root
   cause afterwards (see `INCIDENT_NOTES.md` for the full reasoning).
-
-## Deploying to Hugging Face Spaces
-
-A Hugging Face Space is its own git repository, separate from this one, and
-it expects its `Dockerfile` and `README.md` (with metadata front-matter) at
-its root - which would collide with this repo's own root files. The clean
-way to reconcile that without restructuring this repo is a small local
-"deploy checkout":
-
-1. Create a new Space -> SDK: **Docker** -> note its git URL
-   (`https://huggingface.co/spaces/<you>/<space-name>`).
-2. From this repo (the `deploy/huggingface/` subpath must be preserved -
-   not flattened - because `deploy/huggingface/Dockerfile`'s `COPY`
-   instructions reference it relative to the build context root):
-   ```bash
-   git clone https://huggingface.co/spaces/<you>/<space-name> /tmp/lifeverse-space
-   mkdir -p /tmp/lifeverse-space/deploy/huggingface
-   cp -r backend frontend /tmp/lifeverse-space/
-   cp deploy/huggingface/config.js /tmp/lifeverse-space/deploy/huggingface/config.js
-   cp deploy/huggingface/Dockerfile /tmp/lifeverse-space/Dockerfile
-   cp deploy/huggingface/README_SPACE.md /tmp/lifeverse-space/README.md
-   cd /tmp/lifeverse-space
-   git add -A && git commit -m "deploy: sync from main" && git push
-   ```
-   The `git push` to the Space **is** the deployment trigger - Spaces build
-   and redeploy on every push automatically.
-3. The Space builds `Dockerfile` (= `deploy/huggingface/Dockerfile`), which
-   installs the backend (including CPU-only torch + transformers),
-   pre-fetches the pinned expression-classifier weights, copies the
-   frontend into `static/`, and serves both on port `7860` with
-   `SERVE_FRONTEND=true`. The image is noticeably larger than a
-   mediapipe-only build (~1-1.5GB, mostly torch + the ~350MB classifier
-   weights) and the build itself takes a few minutes - expected, not a
-   sign something's wrong, but worth knowing before you wonder why the
-   first build is slow.
-4. No secrets are required for this app. If any are added later, set them
-   as **Space secrets**, never in the Dockerfile or git history.
-
-(A CI job that automates steps 2-3 on every push to `main` is a natural
-next step - see `context/HOW_TO_PROCEED.md`.)
-
-A **container registry + staging-to-production promotion flow** (build once,
-push to GHCR, deploy the same digest to a staging Space, smoke-test, then
-re-point/redeploy the identical digest to production) is described as a
-next step in `context/HOW_TO_PROCEED.md` rather than implemented here, to
-keep this submission's infrastructure proportionate to a free-tier,
-single-environment assessment.
 
 ## Troubleshooting exercise
 
